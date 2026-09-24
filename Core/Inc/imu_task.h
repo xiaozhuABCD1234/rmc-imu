@@ -22,9 +22,19 @@
  *   4  accel Y       [m/s^2]
  *   5  accel Z       [m/s^2]
  *   6  temperature   [degC]
- *   7  uptime        [s]     (also the frame-loss indicator: it must step by
- *                             exactly 1/IMU_TASK_RATE_HZ in every frame)
- *   8  heater duty   [0..1]
+ *   7  uptime whole seconds  [s]
+ *   8  uptime fraction       [s]  (0 <= frac < 1)
+ *   9  heater duty   [0..1]
+ *
+ * The uptime is split across channels 7 and 8 on purpose. JustFloat carries one
+ * float32 per channel, and a float32's resolution degrades in proportion to its
+ * magnitude: as a single channel, uptime already has a 244 us step after one
+ * hour and 977 us after 2.3 hours, which is coarser than the 1 ms sampling
+ * period. Sending the whole seconds (exact up to 2^24 s) and the fraction (60 ns
+ * resolution in [0,1)) keeps the time base exact indefinitely.
+ *
+ * Channels 7/8 together are the frame-loss indicator: their sum must step by
+ * exactly 1/IMU_TASK_RATE_HZ in every frame.
  */
 
 /*

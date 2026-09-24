@@ -5,8 +5,8 @@
 #include "justfloat.h"
 
 /* The channel map documented in imu_task.h must match the frame layout. */
-#if (JUSTFLOAT_CHANNEL_COUNT != 9U)
-#error "imu_task.c builds exactly 9 JustFloat channels; update both files"
+#if (JUSTFLOAT_CHANNEL_COUNT != 10U)
+#error "imu_task.c builds exactly 10 JustFloat channels; update both files"
 #endif
 
 static SPI_HandleTypeDef *s_spi;
@@ -28,8 +28,14 @@ static void ImuTask_FillFrame(void) {
   s_frame[4] = s_sample.accel_ms2[1];
   s_frame[5] = s_sample.accel_ms2[2];
   s_frame[6] = s_sample.temperature_c;
-  s_frame[7] = (float)s_ticks_consumed / (float)IMU_TASK_RATE_HZ;
-  s_frame[8] = ImuHeater_GetDuty();
+  /*
+   * 时间拆成"整秒 + 秒的小数部分"两路：float32 的精度随数值增大而变差，合成一路
+   * 的话 1 小时后最小步长就有 244 us，比 1 ms 的采样周期还粗（见 imu_task.h）。
+   * 整数除法保证整秒精确，余数除以采样率得到小数部分。
+   */
+  s_frame[7] = (float)(s_ticks_consumed / IMU_TASK_RATE_HZ);
+  s_frame[8] = (float)(s_ticks_consumed % IMU_TASK_RATE_HZ) / (float)IMU_TASK_RATE_HZ;
+  s_frame[9] = ImuHeater_GetDuty();
 }
 
 bool ImuTask_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart) {

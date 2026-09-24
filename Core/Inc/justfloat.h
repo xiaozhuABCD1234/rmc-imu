@@ -23,7 +23,7 @@
  */
 
 /* Channels per frame; VOFA+ must be set to the same count. */
-#define JUSTFLOAT_CHANNEL_COUNT 9U
+#define JUSTFLOAT_CHANNEL_COUNT 10U
 
 /* Frame slots in the TX ring. */
 #define JUSTFLOAT_QUEUE_DEPTH 4U

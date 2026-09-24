@@ -14,7 +14,7 @@
 | --- | --- |
 | IMU 读取 | SPI1 主机，5.25 MHz，模式 0；加速度计 + 陀螺仪 + 温度 |
 | 采样节拍 | TIM3 更新中断 1 kHz（帧率与主循环耗时无关） |
-| 数据上报 | USART1（J30）2000000 8N1，DMA，JustFloat 9 通道，40 B/帧 |
+| 数据上报 | USART1（J30）2000000 8N1，DMA，JustFloat 10 通道，44 B/帧 |
 | 恒温控制 | TIM10_CH1 (PF6) 驱动加热电阻，PI 闭环，目标 40 ℃，10 Hz |
 | 状态指示 | 红灯=IMU 未就绪，绿灯=推流中，蓝灯=1 Hz 心跳 |
 | 容错 | IWDG ~4 s；IMU 掉线每秒自动重初始化；读失败 1 s 关加热 |
@@ -42,20 +42,41 @@ BMI088 焊接在板上，**采 IMU 不需要任何接线**；只有上报数据�
 ## JustFloat 协议
 
 ```text
-frame = [float32 ch0][float32 ch1] ... [float32 ch8][00 00 80 7F]
+frame = [float32 ch0][float32 ch1] ... [float32 ch9][00 00 80 7F]
 ```
 
 小端 IEEE-754 单精度；帧尾 `00 00 80 7F` 是 `0x7F800000`（+∞）的小端字节序，
-VOFA+ 用它作为帧结束标志。本工程 9 通道，一帧 **40 字节**。
+VOFA+ 用它作为帧结束标志。本工程 10 通道，一帧 **44 字节**。
 参考 <https://www.vofa.plus/docs/learning/dataengines/justfloat>
 
 | 通道 | 含义 | 单位 | | 通道 | 含义 | 单位 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0/1/2 | 陀螺仪 X/Y/Z | deg/s | | 6 | IMU 温度 | ℃ |
-| 3/4/5 | 加速度计 X/Y/Z | m/s² | | 7 | uptime | s |
-| | | | | 8 | 加热占空比 | 0~1 |
+| 0/1/2 | 陀螺仪 X/Y/Z | deg/s | | 7 | 上电计时**整秒** | s |
+| 3/4/5 | 加速度计 X/Y/Z | m/s² | | 8 | 上电计时**小数部分** | s (0~1) |
+| 6 | IMU 温度 | ℃ | | 9 | 加热占空比 | 0~1 |
 
-通道 7 兼作**丢帧指示**：正常每帧步进 1/采样率，出现跳变即丢了数据。
+通道 7+8 合起来是上电计时，兼作**丢帧指示**：两者之和正常每帧步进 1/采样率，出现跳变
+即丢了数据。
+
+### 为什么时间要占两个通道
+
+JustFloat 每通道就是一个 float32，而 float32 的精度随数值线性变差（尾数 24 位）。把
+"上电以来经过了多少秒"塞进**一个**通道时，最小步长会随时间增长：
+
+| 板子 uptime | 单通道 float32 秒的最小步长 |
+| --- | --- |
+| 10 min | 61 µs |
+| 1 h | 244 µs |
+| 2.3 h | 0.98 ms |
+| 4.6 h | 1.95 ms |
+
+到 2.3 小时就已经比 1 ms 的采样周期还粗了。拆成"整秒 + 秒的小数部分"之后：
+
+- 整秒在 2²⁴ 秒（194 天）以内都是**精确**的整数（float32 可精确表示 ≤2²⁴ 的整数）；
+- 小数部分始终落在 [0,1)，float32 在这个区间的分辨率恒为 **60 ns**。
+
+所以时间基准不再随时间退化。实测每帧步进与 1 ms 的偏差不超过 **±47 ns**，4 s 累计漂移
+**9 ns**（改前在 1 小时处是 ±122 µs）。
 
 ## 速率上限与推荐
 
@@ -63,7 +84,7 @@ VOFA+ 用它作为帧结束标志。本工程 9 通道，一帧 **40 字节**。
 | --- | --- |
 | BMI088 陀螺仪 ODR | **2000 Hz**（`GYRO_BANDWIDTH` 最高值） |
 | BMI088 加速度计 ODR | 1600 Hz；2 kHz 采样时平均 1.25 倍重复 |
-| 串口带宽 | 吞吐 / 40 字节：2 Mbps → 5000 Hz，921600 → 2300 Hz |
+| 串口带宽 | 吞吐 / 44 字节：2 Mbps → 4500 Hz，921600 → 2100 Hz |
 | SPI 轮询 | ~45 µs/次（3 次 HAL 传输共 19 字节），2 kHz 时占 CPU ~9 % |
 
 **推荐 1 kHz**。同板同条件 A/B 实测（只改采样率与陀螺仪滤波）：
@@ -124,7 +145,7 @@ TIM3 更新中断 (1 kHz) ──置标志──► 主循环 ImuTask_Poll
 | --- | --- | --- |
 | 波特率 | `main.h` `APP_UART_BAUD_RATE` | 2000000 |
 | 采样率 | `imu_task.h` `IMU_TASK_RATE_HZ` | 1000 Hz |
-| 通道数 | `justfloat.h` `JUSTFLOAT_CHANNEL_COUNT` | 9（须与 `imu_task.c` 一致） |
+| 通道数 | `justfloat.h` `JUSTFLOAT_CHANNEL_COUNT` | 10（须与 `imu_task.c` 一致） |
 | 发送队列深度 | `justfloat.h` `JUSTFLOAT_QUEUE_DEPTH` | 4（同时在途 3 帧） |
 | 加热目标 / 上限 | `imu_heater.h` | 40.0 ℃ / 0.85 |
 | 加热开关 | `imu_heater.h` `IMU_HEATER_ENABLE` | 1 |
@@ -235,7 +256,7 @@ Linux/macOS，只需标准库；Windows 用 pyserial 或直接开 VOFA+。
 ```bash
 python3 - <<'PY'
 import os, termios, time, struct, statistics
-port, baud, CH = "/dev/ttyACM1", termios.B2000000, 9
+port, baud, CH = "/dev/ttyACM1", termios.B2000000, 10
 fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
 a = termios.tcgetattr(fd); a[0] = a[1] = a[3] = 0
 a[2] = termios.CREAD | termios.CLOCAL | termios.CS8; a[4] = a[5] = baud
@@ -255,7 +276,8 @@ while time.monotonic() - t0 < 3.0:
         del buf[:t + 4]
 os.close(fd); dt = time.monotonic() - t0
 print("%d 字节, %d 帧, %.1f fps, 坏帧 %d" % (raw, len(frames), len(frames) / dt, invalid))
-print("uptime 步进 %.4f ms" % (1000 * (frames[-1][7] - frames[0][7]) / (len(frames) - 1)))
+up = [f[7] + f[8] for f in frames]          # 整秒 + 小数
+print("uptime 步进 %.6f ms" % (1000 * (up[-1] - up[0]) / (len(up) - 1)))
 print("|accel| = %.3f m/s^2" % statistics.fmean(
     [(f[3] ** 2 + f[4] ** 2 + f[5] ** 2) ** 0.5 for f in frames]))
 PY
@@ -268,10 +290,10 @@ PY
 | 项目 | 实测 |
 | --- | --- |
 | 帧率 / uptime 步进 | 999.0 fps / **1.0000 ms** |
-| 丢字节 | **0**（3 s 抓 119960 字节 = 2999 帧 × 40） |
+| 丢字节 | **0**（抓到的字节数严格等于帧数 × 44） |
 | \|加速度\| 静止 | 9.83 m/s²（未标定，真值 9.80665） |
 | 陀螺仪静止噪声 | 0.20 / 0.28 / 0.24 deg/s |
-| 温度 | 稳定 **40.000 ℃**，占空比 ~0.16 |
+| 温度 | 稳定 **40.000 ℃**，占空比 ~0.15 |
 | LED | 绿灯常亮 + 蓝灯 1 Hz |
 
 > 刚打开串口时可能丢掉半帧（解析器从头就是半帧），统计里体现为 1 个“坏帧”，
@@ -282,7 +304,7 @@ PY
 | 现象 | 检查 |
 | --- | --- |
 | 完全没有数据 | 用的是 J30（丝印 `UART2`）pin2/pin3，TX/RX 交叉，波特率 2000000 |
-| 乱码 / 坏帧增长 | 波特率不匹配；数据引擎必须是 JustFloat，通道数 9 |
+| 乱码 / 坏帧增长 | 波特率不匹配；数据引擎必须是 JustFloat，通道数 10 |
 | 数据跳变 / 通道错位 | USB-TTL 在 2 Mbps 下丢字节，降到 921600 并降采样率复测 |
 | 红灯常亮 | BMI088 通信失败：片选引脚定义、SPI1 是否被摄像头等占用 |
 | 温度不升、`heater` 卡 0.85 | **先查 XT30 输入电源**（见「BMI088 三个坑」第 3 条），别先怀疑固件 |
