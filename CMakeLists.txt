@@ -41,7 +41,7 @@ set(CORE_SOURCES
     Core/Src/bmi088.c
     Core/Src/imu_heater.c
     Core/Src/imu_task.c
-    Core/Src/justfloat.c
+    Core/Src/imu_stream.c
     Core/Src/stm32f4xx_hal_msp.c
     Core/Src/stm32f4xx_it.c
     Core/Src/system_stm32f4xx.c)

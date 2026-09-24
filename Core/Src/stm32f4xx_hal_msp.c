@@ -42,7 +42,7 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* USART1: JustFloat stream to the host (J30 pin 2)                           */
+/* USART1: binary IMU stream to the host (J30 pin 2)                         */
 /* -------------------------------------------------------------------------- */
 void HAL_UART_MspInit(UART_HandleTypeDef *huart) {
   GPIO_InitTypeDef gpio = {0};
@@ -88,12 +88,18 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart) {
 /* Timers                                                                     */
 /* -------------------------------------------------------------------------- */
 void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim_base) {
-  if (htim_base->Instance == TIM3) {
-    __HAL_RCC_TIM3_CLK_ENABLE();
+  /*
+   * The peripheral clock has to be enabled here, before HAL_TIM_Base_Init()
+   * writes the configuration registers: with the clock gated those writes are
+   * silently discarded and the timer stays at its reset values, which looks
+   * exactly like "the timer never counts".
+   */
+  if (htim_base->Instance == TIM5) {
+    __HAL_RCC_TIM5_CLK_ENABLE();
 
-    /* Sampling ticks are the highest priority job in the system. */
-    HAL_NVIC_SetPriority(TIM3_IRQn, 1U, 0U);
-    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+    /* Only extends the timestamp counter to 64 bits, once every ~51 s. */
+    HAL_NVIC_SetPriority(TIM5_IRQn, 2U, 0U);
+    HAL_NVIC_EnableIRQ(TIM5_IRQn);
   }
 }
 

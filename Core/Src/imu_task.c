@@ -1,41 +1,87 @@
 #include "imu_task.h"
 
+#include <string.h>
+
 #include "bmi088.h"
 #include "imu_heater.h"
-#include "justfloat.h"
+#include "imu_stream.h"
 
-/* The channel map documented in imu_task.h must match the frame layout. */
-#if (JUSTFLOAT_CHANNEL_COUNT != 10U)
-#error "imu_task.c builds exactly 10 JustFloat channels; update both files"
+/* The timestamp counter and the ranges reported in every frame must match what
+ * the driver actually configures. */
+#if (BMI088_ACC_RANGE_VALUE > 3U)
+#error "ACC_RANGE register value must be 0..3"
 #endif
 
-static SPI_HandleTypeDef *s_spi;
-static Bmi088Sample s_sample;
-static float s_frame[JUSTFLOAT_CHANNEL_COUNT];
+#if (BMI088_GYRO_RANGE_VALUE > 4U)
+#error "GYRO_RANGE register value must be 0..4"
+#endif
 
-static volatile uint32_t s_ticks; /* advanced by the sampling ISR */
-static uint32_t s_ticks_consumed; /* ticks that have produced a frame */
-static uint32_t s_heater_tick;    /* tick of the last heater update */
+/* TIM5 runs from the APB1 timer clock. */
+#define IMU_TASK_TIMESTAMP_HZ 84000000U
+
+#define IMU_TASK_NS_PER_MS 1000000ULL
+#define IMU_TASK_HEATER_PERIOD_NS \
+  ((uint64_t)IMU_TASK_HEATER_PERIOD_MS * IMU_TASK_NS_PER_MS)
+
+static SPI_HandleTypeDef *s_spi;
+
+/* --- hardware timestamp ------------------------------------------------ */
+/* s_timer_high is the upper half of the 64-bit counter; TIM5->CNT is the lower
+ * half and is read at the instant of the data-ready edge. */
+static volatile uint32_t s_timer_high;
+static volatile uint64_t s_capture_ns;
+static volatile uint8_t s_drdy_pending;
+static volatile uint32_t s_drdy_overruns;
+
+/* --- task state -------------------------------------------------------- */
+static uint64_t s_heater_ns;
+static uint8_t s_heater_started;
 static uint32_t s_last_init_ms;
 static uint32_t s_read_failures;
+static uint8_t s_read_error_pending;
 static bool s_ready;
 
-static void ImuTask_FillFrame(void) {
-  s_frame[0] = s_sample.gyro_dps[0];
-  s_frame[1] = s_sample.gyro_dps[1];
-  s_frame[2] = s_sample.gyro_dps[2];
-  s_frame[3] = s_sample.accel_ms2[0];
-  s_frame[4] = s_sample.accel_ms2[1];
-  s_frame[5] = s_sample.accel_ms2[2];
-  s_frame[6] = s_sample.temperature_c;
+/* ---------------------------------------------------------------------- */
+
+static uint64_t ImuTask_ReadTicks(void) {
+  uint32_t high_before;
+  uint32_t high_after;
+  uint32_t low;
+
+  /* The counter can overflow between reading the two halves, so repeat the
+   * read if the high word changed underneath us. */
+  do {
+    high_before = s_timer_high;
+    low = TIM5->CNT;
+    high_after = s_timer_high;
+  } while (high_before != high_after);
+
+  return ((uint64_t)high_after << 32) | (uint64_t)low;
+}
+
+static uint64_t ImuTask_TicksToNs(uint64_t ticks) {
   /*
-   * 时间拆成"整秒 + 秒的小数部分"两路：float32 的精度随数值增大而变差，合成一路
-   * 的话 1 小时后最小步长就有 244 us，比 1 ms 的采样周期还粗（见 imu_task.h）。
-   * 整数除法保证整秒精确，余数除以采样率得到小数部分。
+   * 1 us is 84 ticks, so ns = ticks * 1000 / 84 (truncated to well under 1 ns).
+   * The product stays inside 64 bits for the first ~6 years of uptime.
    */
-  s_frame[7] = (float)(s_ticks_consumed / IMU_TASK_RATE_HZ);
-  s_frame[8] = (float)(s_ticks_consumed % IMU_TASK_RATE_HZ) / (float)IMU_TASK_RATE_HZ;
-  s_frame[9] = ImuHeater_GetDuty();
+  return (ticks * 1000ULL) / (uint64_t)(IMU_TASK_TIMESTAMP_HZ / 1000000U);
+}
+
+uint64_t ImuTask_NowNs(void) {
+  return ImuTask_TicksToNs(ImuTask_ReadTicks());
+}
+
+void ImuTask_OnGyroDataReady(void) {
+  if (s_drdy_pending != 0U) {
+    /* The main loop had not consumed the previous sample yet. */
+    ++s_drdy_overruns;
+  }
+  s_capture_ns = ImuTask_TicksToNs(ImuTask_ReadTicks());
+  s_drdy_pending = 1U;
+}
+
+void ImuTask_OnTimestampOverflow(void) {
+  ++s_timer_high;
 }
 
 bool ImuTask_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart) {
@@ -44,11 +90,15 @@ bool ImuTask_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart) {
   }
 
   s_spi = hspi;
-  JustFloat_Init(huart);
+  ImuStream_Init(huart);
 
-  s_ticks = 0U;
-  s_ticks_consumed = 0U;
-  s_heater_tick = 0U;
+  s_timer_high = 0U;
+  s_capture_ns = 0U;
+  s_drdy_pending = 0U;
+  s_drdy_overruns = 0U;
+  s_heater_ns = 0U;
+  s_heater_started = 0U;
+  s_read_error_pending = 0U;
   s_read_failures = 0U;
   s_last_init_ms = HAL_GetTick();
 
@@ -60,12 +110,26 @@ bool ImuTask_IsReady(void) {
   return s_ready;
 }
 
-void ImuTask_OnSampleTick(void) {
-  ++s_ticks;
+static void ImuTask_HandleReadFailure(void) {
+  s_read_error_pending = 1U;
+
+  if (++s_read_failures >= IMU_TASK_REINIT_AFTER_FAILURES) {
+    /*
+     * No temperature feedback while the reads fail, so the heater must not keep
+     * its last duty, and the IMU is probably wedged: hand it back to the
+     * initialisation retry path.
+     */
+    ImuHeater_Disable();
+    s_read_failures = 0U;
+    s_ready = false;
+  }
 }
 
 void ImuTask_Poll(void) {
-  uint32_t ticks;
+  Bmi088Sample raw;
+  ImuStreamSample sample;
+  uint64_t capture_ns;
+  uint32_t overruns;
 
   if (!s_ready) {
     /*
@@ -73,63 +137,67 @@ void ImuTask_Poll(void) {
      * watchdog fed and the queue drained instead of locking up, and retry once
      * a second so the board recovers on its own.
      */
-    uint32_t const now = HAL_GetTick();
+    const uint32_t now = HAL_GetTick();
     if ((now - s_last_init_ms) >= IMU_TASK_RETRY_MS) {
       s_last_init_ms = now;
       s_ready = Bmi088_Init(s_spi);
       if (s_ready) {
-        /* Drop whatever accumulated while the interface was being set up. */
-        s_ticks_consumed = 0U;
-        s_ticks = 0U;
-        s_heater_tick = 0U;
+        s_drdy_pending = 0U;
+        s_drdy_overruns = 0U;
         s_read_failures = 0U;
+        s_read_error_pending = 0U;
+        s_heater_started = 0U;
       }
     }
-    JustFloat_Poll();
+    ImuStream_Poll();
     return;
   }
 
-  ticks = s_ticks;
-  if (ticks == s_ticks_consumed) {
-    JustFloat_Poll();
+  if (s_drdy_pending == 0U) {
+    ImuStream_Poll();
     return;
   }
-  /*
-   * One SPI read produces one sample, so if several periods elapsed only the
-   * newest sample is kept. The uptime channel steps by the real elapsed time,
-   * which is how the host notices the gap.
-   */
-  s_ticks_consumed = ticks;
 
-  if (!Bmi088_Read(&s_sample)) {
-    if (++s_read_failures >= IMU_TASK_REINIT_AFTER_FAILURES) {
-      /*
-       * No temperature feedback while the reads fail, so the heater must not
-       * keep its last duty, and the IMU is probably wedged: hand it back to the
-       * initialisation retry path above.
-       */
-      ImuHeater_Disable();
-      s_read_failures = 0U;
-      s_ready = false;
-    }
-    JustFloat_Poll();
+  /* Claim the pending sample before touching SPI: a new edge arriving during
+   * the read sets the flag again and counts as an overrun. */
+  s_drdy_pending = 0U;
+  capture_ns = s_capture_ns;
+  overruns = s_drdy_overruns;
+  s_drdy_overruns = 0U;
+
+  if (!Bmi088_Read(&raw)) {
+    ImuTask_HandleReadFailure();
+    ImuStream_Poll();
     return;
   }
   s_read_failures = 0U;
 
-  ImuTask_FillFrame();
-  (void)JustFloat_Send(s_frame);
+  sample.timestamp_ns = capture_ns;
+  memcpy(sample.gyro_raw, raw.gyro_raw, sizeof(sample.gyro_raw));
+  memcpy(sample.accel_raw, raw.accel_raw, sizeof(sample.accel_raw));
+  sample.temperature_code = raw.temperature_code;
+  sample.gyro_range = BMI088_GYRO_RANGE_VALUE;
+  sample.accel_range = BMI088_ACC_RANGE_VALUE;
+  sample.flags = 0U;
+  if (overruns > 0U) {
+    sample.flags |= IMU_STREAM_FLAG_SAMPLE_LOST;
+  }
+  if (s_read_error_pending != 0U) {
+    sample.flags |= IMU_STREAM_FLAG_READ_ERROR;
+    s_read_error_pending = 0U;
+  }
+  (void)ImuStream_Send(&sample);
 
-  /*
-   * Feed the heater from the real elapsed tick count rather than a fixed
-   * divisor, so a skipped sample cannot stall the controller or bias its dt.
-   */
-  if ((s_ticks_consumed - s_heater_tick) >= IMU_TASK_HEATER_DIVIDER) {
-    float const dt_s = (float)(s_ticks_consumed - s_heater_tick) /
-                       (float)IMU_TASK_RATE_HZ;
-    s_heater_tick = s_ticks_consumed;
-    ImuHeater_Control(s_sample.temperature_c, dt_s);
+  /* Heater: fixed control period, but dt from the real elapsed time so a
+   * skipped sample cannot bias the integral. */
+  if (s_heater_started == 0U) {
+    s_heater_ns = capture_ns;
+    s_heater_started = 1U;
+  } else if ((capture_ns - s_heater_ns) >= IMU_TASK_HEATER_PERIOD_NS) {
+    const float dt_s = (float)(capture_ns - s_heater_ns) * 1e-9f;
+    s_heater_ns = capture_ns;
+    ImuHeater_Control(Bmi088_TemperatureC(raw.temperature_code), dt_s);
   }
 
-  JustFloat_Poll();
+  ImuStream_Poll();
 }

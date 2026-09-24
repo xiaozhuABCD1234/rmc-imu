@@ -21,6 +21,9 @@
 #define BMI088_GYRO_RANGE 0x0FU
 #define BMI088_GYRO_BANDWIDTH 0x10U
 #define BMI088_GYRO_SOFTRESET 0x14U
+#define BMI088_GYRO_INT_CTRL 0x15U
+#define BMI088_INT3_INT4_IO_CONF 0x16U
+#define BMI088_INT3_INT4_IO_MAP 0x18U
 
 #define BMI088_SOFTRESET_COMMAND 0xB6U
 
@@ -29,25 +32,16 @@
 /* below are derived from these values.                                      */
 /* ------------------------------------------------------------------------- */
 
-/* ACC_RANGE (0x41): 0 = +-3 g, 1 = +-6 g, 2 = +-12 g, 3 = +-24 g. */
-#define BMI088_ACC_RANGE_VALUE 0x01U
-#define BMI088_ACC_RANGE_G (3.0f * (float)(1UL << BMI088_ACC_RANGE_VALUE))
-
 /*
- * ACC_CONF (0x40): bit 7 must always be written as 1, acc_bwp is [6:4], acc_odr
- * is [3:0]. acc_bwp = 0x02 is the "normal" filter; acc_odr = 0x0B is 800 Hz,
- * whose normal filter still anti-aliases well for a 1 kHz loop. The
- * accelerometer tops out at 0x0C (1600 Hz) for lower latency.
+ * ACC_CONF (0x40), see datasheet 5.3.10: acc_bwp occupies bits [7:4] and its
+ * legal values are 0x08 (4x oversampling), 0x09 (2x) and 0x0A (normal); bit 7
+ * must be 1, which 0x0A already contains. acc_odr is [3:0]: 0x0B is 800 Hz and
+ * 0x0C is 1600 Hz.
  */
-#define BMI088_ACC_BWP_NORMAL 0x02U
-#define BMI088_ACC_ODR_VALUE 0x0BU
+#define BMI088_ACC_BWP_NORMAL 0x0AU
+#define BMI088_ACC_ODR_VALUE 0x0CU
 #define BMI088_ACC_CONF_VALUE \
-  (uint8_t)(0x80U | (BMI088_ACC_BWP_NORMAL << 4U) | BMI088_ACC_ODR_VALUE)
-
-/* GYRO_RANGE (0x0F): 0 = +-2000 dps, 1 = +-1000, 2 = +-500, 3 = +-250, 4 = +-125. */
-#define BMI088_GYRO_RANGE_VALUE 0x00U
-#define BMI088_GYRO_RANGE_DPS \
-  (2000.0f / (float)(1UL << BMI088_GYRO_RANGE_VALUE))
+  (uint8_t)((BMI088_ACC_BWP_NORMAL << 4U) | BMI088_ACC_ODR_VALUE)
 
 /*
  * GYRO_BANDWIDTH (0x10): 0x02 = 1000 Hz ODR / 116 Hz filter, matching the
@@ -70,9 +64,6 @@
 #define BMI088_ACCEL_SETTLE_MS 5U   /* settling after a power mode change */
 #define BMI088_CS_PULSE_MS 1U       /* CSB1 low pulse for the SPI mode switch */
 
-#define BMI088_GRAVITY_MS2 9.80665f
-#define BMI088_LSB_COUNT 32768.0f
-
 #define BMI088_CS_ACCEL_LOW()                                        \
   HAL_GPIO_WritePin(BMI088_CS_ACCEL_GPIO_PORT, BMI088_CS_ACCEL_PIN,  \
                     GPIO_PIN_RESET)
@@ -90,12 +81,6 @@
 /* Module state                                                              */
 /* ------------------------------------------------------------------------- */
 static SPI_HandleTypeDef *s_spi;
-
-/* LSB to engineering unit, derived from the ranges configured above. */
-static const float s_accel_ms2_per_lsb =
-    (BMI088_GRAVITY_MS2 * BMI088_ACC_RANGE_G) / BMI088_LSB_COUNT;
-static const float s_gyro_dps_per_lsb =
-    BMI088_GYRO_RANGE_DPS / BMI088_LSB_COUNT;
 
 /* ------------------------------------------------------------------------- */
 /* Bit-level helpers                                                         */
@@ -284,9 +269,20 @@ bool Bmi088_Init(SPI_HandleTypeDef *hspi) {
     return false;
   }
 
-  /* Gyroscope: normal power mode, +-2000 dps, 1000 Hz ODR / 116 Hz filter. */
+  /* Gyroscope: +-2000 dps, 1000 Hz ODR / 116 Hz filter. */
   if (!Bmi088_GyroWrite(BMI088_GYRO_RANGE, BMI088_GYRO_RANGE_VALUE) ||
       !Bmi088_GyroWrite(BMI088_GYRO_BANDWIDTH, BMI088_GYRO_BANDWIDTH_VALUE)) {
+    return false;
+  }
+
+  /*
+   * Route the gyroscope data-ready to INT3 (the die's pin that the board wires
+   * to PC5) as push-pull active high, and enable it: 0x15 data_en = 1,
+   * 0x16 int3 = output / push-pull / active high, 0x18 int3_data = 1.
+   */
+  if (!Bmi088_GyroWrite(BMI088_INT3_INT4_IO_CONF, 0x00U) ||
+      !Bmi088_GyroWrite(BMI088_INT3_INT4_IO_MAP, 0x01U) ||
+      !Bmi088_GyroWrite(BMI088_GYRO_INT_CTRL, 0x80U)) {
     return false;
   }
 
@@ -312,9 +308,6 @@ bool Bmi088_Init(SPI_HandleTypeDef *hspi) {
 bool Bmi088_Read(Bmi088Sample *sample) {
   uint8_t raw[6];
   uint8_t temp_raw[2];
-  int16_t gyro[3];
-  int16_t accel[3];
-  int16_t temperature;
   uint16_t temperature_code;
 
   if ((s_spi == NULL) || (sample == NULL)) {
@@ -325,7 +318,7 @@ bool Bmi088_Read(Bmi088Sample *sample) {
     return false;
   }
   for (uint8_t axis = 0U; axis < 3U; ++axis) {
-    gyro[axis] =
+    sample->gyro_raw[axis] =
         (int16_t)(((uint16_t)raw[axis * 2U + 1U] << 8) | raw[axis * 2U]);
   }
 
@@ -333,7 +326,7 @@ bool Bmi088_Read(Bmi088Sample *sample) {
     return false;
   }
   for (uint8_t axis = 0U; axis < 3U; ++axis) {
-    accel[axis] =
+    sample->accel_raw[axis] =
         (int16_t)(((uint16_t)raw[axis * 2U + 1U] << 8) | raw[axis * 2U]);
   }
 
@@ -346,15 +339,13 @@ bool Bmi088_Read(Bmi088Sample *sample) {
    */
   temperature_code =
       (uint16_t)(((uint16_t)temp_raw[0] * 8U) + (temp_raw[1] / 32U));
-  temperature = (temperature_code > 1023U)
-                    ? (int16_t)(temperature_code - 2048U)
-                    : (int16_t)temperature_code;
-
-  for (uint8_t axis = 0U; axis < 3U; ++axis) {
-    sample->gyro_dps[axis] = (float)gyro[axis] * s_gyro_dps_per_lsb;
-    sample->accel_ms2[axis] = (float)accel[axis] * s_accel_ms2_per_lsb;
-  }
-  sample->temperature_c = ((float)temperature * 0.125f) + 23.0f;
+  sample->temperature_code = (temperature_code > 1023U)
+                                 ? (int16_t)(temperature_code - 2048U)
+                                 : (int16_t)temperature_code;
 
   return true;
+}
+
+float Bmi088_TemperatureC(int16_t temperature_code) {
+  return ((float)temperature_code * 0.125f) + 23.0f;
 }

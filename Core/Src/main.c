@@ -5,11 +5,11 @@
 #include "bmi088.h"
 #include "imu_heater.h"
 #include "imu_task.h"
-#include "justfloat.h"
+#include "imu_stream.h"
 
 SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart1;
-TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim5;
 TIM_HandleTypeDef htim10;
 #if APP_ENABLE_IWDG
 IWDG_HandleTypeDef hiwdg;
@@ -19,7 +19,7 @@ static void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_TIM3_Init(void);
+static void MX_TIM5_Init(void);
 static void MX_TIM10_Init(void);
 #if APP_ENABLE_IWDG
 static void MX_IWDG_Init(void);
@@ -42,7 +42,7 @@ int main(void) {
   MX_GPIO_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
-  MX_TIM3_Init();
+  MX_TIM5_Init();
   MX_TIM10_Init();
 #if APP_ENABLE_IWDG
   MX_IWDG_Init();
@@ -53,8 +53,12 @@ int main(void) {
     Error_Handler();
   }
 
-  /* The sampling time base. Ticks only set a flag, the main loop does the SPI. */
-  if (HAL_TIM_Base_Start_IT(&htim3) != HAL_OK) {
+  /*
+   * Free-running 84 MHz counter used to timestamp the gyroscope data-ready
+   * edges. The update interrupt only extends the counter to 64 bits, so it
+   * fires once every ~51 s.
+   */
+  if (HAL_TIM_Base_Start_IT(&htim5) != HAL_OK) {
     Error_Handler();
   }
 
@@ -105,6 +109,7 @@ static void MX_GPIO_Init(void) {
 
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
 
   /* Chip selects idle high. Both are plain GPIO, not SPI hardware NSS. */
@@ -120,6 +125,20 @@ static void MX_GPIO_Init(void) {
   HAL_GPIO_Init(BMI088_CS_ACCEL_GPIO_PORT, &gpio);
   gpio.Pin = BMI088_CS_GYRO_PIN;
   HAL_GPIO_Init(BMI088_CS_GYRO_GPIO_PORT, &gpio);
+
+  /*
+   * Gyroscope data-ready on PC5. The BMI088 drives it push-pull active high
+   * (configured in bmi088.c), so a pull-down only defines the level while the
+   * sensor is not configured yet.
+   */
+  gpio.Mode = GPIO_MODE_IT_RISING;
+  gpio.Pull = GPIO_PULLDOWN;
+  gpio.Pin = BMI088_INT_GYRO_PIN;
+  HAL_GPIO_Init(BMI088_INT_GPIO_PORT, &gpio);
+
+  /* Highest priority in the system: the sample timestamp is taken on entry. */
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0U, 0U);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* Status LED, off at boot (output high would light it, so drive low). */
   HAL_GPIO_WritePin(LED_R_GPIO_PORT, LED_R_PIN, GPIO_PIN_RESET);
@@ -176,37 +195,33 @@ static void MX_USART1_UART_Init(void) {
   }
 }
 
-static void MX_TIM3_Init(void) {
+static void MX_TIM5_Init(void) {
   TIM_ClockConfigTypeDef clock_source = {0};
   TIM_MasterConfigTypeDef master = {0};
 
   /*
-   * TIM3 sits on APB1. PCLK1 = HCLK/4 = 42 MHz and, because the APB1 divider
-   * is not 1, the timer counter clock is twice PCLK1: 84 MHz. A prescaler of
-   * 8399 therefore gives a 10 kHz tick and the period finishes the division
-   * down to IMU_TASK_RATE_HZ.
-   *
-   * (APB2 is HCLK/2 = 84 MHz, so TIM10 - also an APB2 timer - really does run
-   *  at 168 MHz. The two timers are not on the same clock.)
+   * TIM5 sits on APB1. PCLK1 = HCLK/4 = 42 MHz and, because the APB1 divider is
+   * not 1, the timer clock is twice PCLK1: 84 MHz. With no prescaler and the
+   * full 32-bit period it runs free and wraps every ~51 s; ImuTask extends it
+   * in the update interrupt.
    */
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 8399U;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = (10000U / IMU_TASK_RATE_HZ) - 1U;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK) {
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 0U;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 0xFFFFFFFFU;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK) {
     Error_Handler();
   }
 
   clock_source.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &clock_source) != HAL_OK) {
+  if (HAL_TIM_ConfigClockSource(&htim5, &clock_source) != HAL_OK) {
     Error_Handler();
   }
 
-  master.MasterOutputTrigger = TIM_TRGO_RESET;
   master.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &master) != HAL_OK) {
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &master) != HAL_OK) {
     Error_Handler();
   }
 }
@@ -261,12 +276,19 @@ static void MX_IWDG_Init(void) {
 #endif
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-  JustFloat_OnTxComplete(huart);
+  ImuStream_OnTxComplete(huart);
+}
+
+/* Gyroscope data-ready (PC5): the sample clock of the whole application. */
+void HAL_GPIO_EXTI_Callback(uint16_t gpio_pin) {
+  if (gpio_pin == BMI088_INT_GYRO_PIN) {
+    ImuTask_OnGyroDataReady();
+  }
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-  if (htim->Instance == TIM3) {
-    ImuTask_OnSampleTick();
+  if (htim->Instance == TIM5) {
+    ImuTask_OnTimestampOverflow();
   }
 }
 

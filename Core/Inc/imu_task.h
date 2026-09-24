@@ -7,45 +7,41 @@
 #include "stm32f4xx_hal.h"
 
 /*
- * Application task: samples the BMI088 at a fixed rate and streams the result
- * to the host as JustFloat frames over UART.
+ * Sampling task: reads the BMI088 once per gyroscope data-ready interrupt and
+ * hands one frame to ImuStream.
  *
- * The sampling instants come from a timer update interrupt so the frame rate
- * does not depend on how long the main loop takes; all SPI traffic, however,
- * is done from the main loop, never from an interrupt.
+ * Why the data-ready pin is the sample clock
+ * -----------------------------------------
+ * The BMI088 converts on its own internal time base, which is independent of
+ * and slower than any timer on the MCU (measured: ~850 Hz at the nominal
+ * 1000 Hz GYRO_BANDWIDTH setting). Polling from a TIM3 tick therefore
+ * misrepresents the data twice: about 15 % of the reads returned a repeated
+ * gyroscope sample, and the frame timestamp was the polling tick, which can be
+ * up to a whole sensor period away from the instant the sensor actually
+ * converted.
  *
- * JustFloat channel map (fixed order, see JUSTFLOAT_CHANNEL_COUNT):
- *   0  gyro X        [deg/s]
- *   1  gyro Y        [deg/s]
- *   2  gyro Z        [deg/s]
- *   3  accel X       [m/s^2]
- *   4  accel Y       [m/s^2]
- *   5  accel Z       [m/s^2]
- *   6  temperature   [degC]
- *   7  uptime whole seconds  [s]
- *   8  uptime fraction       [s]  (0 <= frac < 1)
- *   9  heater duty   [0..1]
+ * Driving the read from the gyroscope data-ready pin (PC5) fixes both: every
+ * frame carries exactly one fresh conversion, and the timestamp is taken from a
+ * free-running 84 MHz counter at the moment the edge is serviced.
  *
- * The uptime is split across channels 7 and 8 on purpose. JustFloat carries one
- * float32 per channel, and a float32's resolution degrades in proportion to its
- * magnitude: as a single channel, uptime already has a 244 us step after one
- * hour and 977 us after 2.3 hours, which is coarser than the 1 ms sampling
- * period. Sending the whole seconds (exact up to 2^24 s) and the fraction (60 ns
- * resolution in [0,1)) keeps the time base exact indefinitely.
+ * Timestamps
+ * ----------
+ * TIM5 runs free at 84 MHz (APB1 timer clock). Its 32-bit counter is extended
+ * to 64 bits by the update interrupt, so there is no wrap to worry about, and
+ * DRDY edges are timestamped with the counter read inside the interrupt. The
+ * resolution is one 84 MHz tick, about 12 ns; the residual error is the
+ * interrupt entry latency, which is a few tens of nanoseconds because this
+ * interrupt is given the highest priority.
  *
- * Channels 7/8 together are the frame-loss indicator: their sum must step by
- * exactly 1/IMU_TASK_RATE_HZ in every frame.
+ * Frame rate
+ * ----------
+ * One frame per gyroscope conversion, i.e. the sensor's own ODR. Channels are
+ * no longer sampled on a fixed grid, so the host must derive the nominal period
+ * from the stream rather than being told a rate.
  */
 
-/*
- * Sampling rate, driven by the TIM3 update interrupt. 1 kHz keeps the gyroscope
- * on its matching 1000 Hz ODR / 116 Hz filter; the sensor allows 2000 Hz but
- * that roughly doubles the gyro noise for 0.7 ms less latency.
- */
-#define IMU_TASK_RATE_HZ 1000U
-
-/* Successful samples between two heater control updates (10 Hz). */
-#define IMU_TASK_HEATER_DIVIDER 100U
+/* How often the heater controller is updated. */
+#define IMU_TASK_HEATER_PERIOD_MS 100U
 
 /* How often a failed IMU initialisation is retried. */
 #define IMU_TASK_RETRY_MS 1000U
@@ -55,7 +51,7 @@
  * long enough to ride out a single glitch and short enough that the heater,
  * which is driven from the same readings, is never left running blind.
  */
-#define IMU_TASK_REINIT_AFTER_FAILURES IMU_TASK_RATE_HZ
+#define IMU_TASK_REINIT_AFTER_FAILURES 100U
 
 /* huart must already be initialised for 8N1 TX with a linked TX DMA channel. */
 bool ImuTask_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart);
@@ -63,10 +59,17 @@ bool ImuTask_Init(SPI_HandleTypeDef *hspi, UART_HandleTypeDef *huart);
 /* True once the IMU answered and was configured. Drives the status LED. */
 bool ImuTask_IsReady(void);
 
-/* Call from the timer update callback. Sets the sampling flag only. */
-void ImuTask_OnSampleTick(void);
+/* Call from the gyroscope data-ready EXTI handler: timestamps the edge and
+ * marks a sample as pending. Highest priority interrupt in the system. */
+void ImuTask_OnGyroDataReady(void);
 
-/* Main loop: reads the IMU, builds a frame and feeds the heater controller. */
+/* Call from the 84 MHz timestamp timer update interrupt. */
+void ImuTask_OnTimestampOverflow(void);
+
+/* Current value of the 64-bit timestamp counter, in nanoseconds. */
+uint64_t ImuTask_NowNs(void);
+
+/* Main loop: reads the IMU on a pending data-ready edge and feeds the heater. */
 void ImuTask_Poll(void);
 
 #endif /* IMU_TASK_H */
