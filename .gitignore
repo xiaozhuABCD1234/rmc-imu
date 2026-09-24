@@ -1,0 +1,20 @@
+# Build artifacts
+build/
+build-*/
+Objects/
+Listings/
+
+# Python helper artefacts
+__pycache__/
+*.pyc
+
+# Editor / IDE
+.vscode/
+.idea/
+*.uvguix.*
+*.uvoptx
+*.bak
+
+# OS
+Thumbs.db
+.DS_Store
