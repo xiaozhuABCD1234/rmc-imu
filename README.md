@@ -1,10 +1,10 @@
-# 开发板 C 型 BMI088 高精度 IMU 固件（STM32F407IGHx）
+# rmc-imu — 开发板 C 型 BMI088 高精度 IMU 固件（STM32F407IGHx）
 
 适配 RoboMaster 开发板 C 型。按**陀螺仪数据就绪中断**读取板载 BMI088，用 **84 MHz 硬件计数器**
 给每个样本打时间戳，经 USART1 以**二进制帧（CRC 保护）**上报给上位机。
 
-> 目录名 `rmc-imu-justfloat` 是历史遗留：早期版本用 VOFA+ 的 JustFloat 文本协议。现在
-> 传输的是自定义二进制帧，不再依赖 VOFA+。上位机见 `~/Projects/rmc_imu_ws`。
+> 早期版本用 VOFA+ 的 JustFloat 文本协议，现已完全废弃：传输的是自定义二进制帧，
+> 不再依赖 VOFA+。上位机 ROS 2 节点见 `~/Projects/rmc_imu_ws`。
 
 ## 为什么这样设计
 

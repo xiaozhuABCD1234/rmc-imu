@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(imu_justfloat
+project(rmc_imu
         VERSION 1.0.0
         DESCRIPTION "RoboMaster C board BMI088 IMU streaming over UART with the VOFA+ JustFloat protocol (STM32F407IGHx)"
         LANGUAGES C ASM)
@@ -17,7 +17,7 @@ endif()
 # ---------------------------------------------------------------------------
 # Project settings
 # ---------------------------------------------------------------------------
-set(TARGET_NAME    "imu_justfloat")
+set(TARGET_NAME    "rmc_imu")
 set(DEVICE_DEFS    STM32F407xx USE_HAL_DRIVER)
 set(LINKER_SCRIPT  "${CMAKE_SOURCE_DIR}/STM32F407IGHx_FLASH.ld")
 
@@ -81,7 +81,7 @@ add_executable(${TARGET_NAME}
     ${STARTUP_SOURCE})
 
 set_target_properties(${TARGET_NAME} PROPERTIES
-    OUTPUT_NAME "imu_justfloat"
+    OUTPUT_NAME "rmc_imu"
     SUFFIX      ".elf")
 
 target_compile_definitions(${TARGET_NAME} PRIVATE ${DEVICE_DEFS})
@@ -112,7 +112,7 @@ target_link_options(${TARGET_NAME} PRIVATE
     -specs=nano.specs
     -specs=nosys.specs
     -Wl,--gc-sections
-    "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/imu_justfloat.map")
+    "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/rmc_imu.map")
 
 # ---------------------------------------------------------------------------
 # Post-build: .hex / .bin generation and size report
@@ -125,12 +125,12 @@ find_program(ARM_SIZE arm-none-eabi-size REQUIRED)
 add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O ihex
             $<TARGET_FILE:${TARGET_NAME}>
-            ${CMAKE_CURRENT_BINARY_DIR}/imu_justfloat.hex
+            ${CMAKE_CURRENT_BINARY_DIR}/rmc_imu.hex
     COMMAND ${CMAKE_OBJCOPY} -O binary
             $<TARGET_FILE:${TARGET_NAME}>
-            ${CMAKE_CURRENT_BINARY_DIR}/imu_justfloat.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/rmc_imu.bin
     COMMAND ${ARM_SIZE} $<TARGET_FILE:${TARGET_NAME}>
-    COMMENT "Generating imu_justfloat.hex / .bin and printing size")
+    COMMENT "Generating rmc_imu.hex / .bin and printing size")
 
 # Convenience target: clean + rebuild.
 add_custom_target(rebuild

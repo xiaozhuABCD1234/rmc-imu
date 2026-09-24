@@ -8,7 +8,8 @@
 
 /*
  * Binary framing for the IMU stream. Replaces the former JustFloat/VOFA+
- * encoding, which was designed for plotting and could only carry float32.
+ * encoding that this project started with, which was designed for plotting and
+ * could only carry float32.
  *
  * Frame layout (31 bytes, fixed):
  *
