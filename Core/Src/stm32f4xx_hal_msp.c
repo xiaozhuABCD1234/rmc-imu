@@ -98,13 +98,17 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim_base) {
     __HAL_RCC_TIM5_CLK_ENABLE();
 
     /* Only extends the timestamp counter to 64 bits, once every ~51 s. */
-    HAL_NVIC_SetPriority(TIM5_IRQn, 2U, 0U);
+    HAL_NVIC_SetPriority(TIM5_IRQn, 0U, 0U);
     HAL_NVIC_EnableIRQ(TIM5_IRQn);
   }
 }
 
 void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim_pwm) {
-  if (htim_pwm->Instance == TIM10) {
+  if (htim_pwm->Instance == TIM8) {
+    __HAL_RCC_TIM8_CLK_ENABLE();
+    HAL_NVIC_SetPriority(TIM8_UP_TIM13_IRQn, 2U, 0U);
+    HAL_NVIC_EnableIRQ(TIM8_UP_TIM13_IRQn);
+  } else if (htim_pwm->Instance == TIM10) {
     __HAL_RCC_TIM10_CLK_ENABLE();
   }
 }
@@ -112,7 +116,16 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim_pwm) {
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim) {
   GPIO_InitTypeDef gpio = {0};
 
-  if (htim->Instance == TIM10) {
+  if (htim->Instance == TIM8) {
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    gpio.Pin = GPIO_PIN_6;
+    gpio.Mode = GPIO_MODE_AF_PP;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = GPIO_AF3_TIM8;
+    HAL_GPIO_Init(GPIOC, &gpio);
+  } else if (htim->Instance == TIM10) {
     __HAL_RCC_GPIOF_CLK_ENABLE();
 
     /* Heat_Power: TIM10_CH1 on PF6 drives the BMI088 heating resistor. */

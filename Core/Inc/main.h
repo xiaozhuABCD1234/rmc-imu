@@ -7,6 +7,7 @@
  * to main.c and therefore need no declaration here. */
 extern UART_HandleTypeDef huart1;    /* stm32f4xx_it.c: USART1_IRQHandler */
 extern TIM_HandleTypeDef htim5;      /* stm32f4xx_it.c: TIM5_IRQHandler */
+extern TIM_HandleTypeDef htim8;      /* stm32f4xx_it.c: TIM8_UP_TIM13_IRQHandler */
 extern DMA_HandleTypeDef hdma_usart1_tx; /* stm32f4xx_it.c: DMA2_Stream7 */
 
 /* ------------------------------------------------------------------------- */

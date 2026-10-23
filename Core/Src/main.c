@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "bmi088.h"
+#include "camera_trigger.h"
 #include "imu_heater.h"
 #include "imu_task.h"
 #include "imu_stream.h"
@@ -10,6 +11,7 @@
 SPI_HandleTypeDef hspi1;
 UART_HandleTypeDef huart1;
 TIM_HandleTypeDef htim5;
+TIM_HandleTypeDef htim8;
 TIM_HandleTypeDef htim10;
 #if APP_ENABLE_IWDG
 IWDG_HandleTypeDef hiwdg;
@@ -20,6 +22,7 @@ static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM5_Init(void);
+static void MX_TIM8_Init(void);
 static void MX_TIM10_Init(void);
 #if APP_ENABLE_IWDG
 static void MX_IWDG_Init(void);
@@ -43,6 +46,7 @@ int main(void) {
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_TIM5_Init();
+  MX_TIM8_Init();
   MX_TIM10_Init();
 #if APP_ENABLE_IWDG
   MX_IWDG_Init();
@@ -64,11 +68,13 @@ int main(void) {
 
   ImuHeater_Init(&htim10);
   (void)ImuTask_Init(&hspi1, &huart1);
+  CameraTrigger_Init(&htim8);
 
   while (1) {
 #if APP_ENABLE_IWDG
     HAL_IWDG_Refresh(&hiwdg);
 #endif
+    CameraTrigger_Poll();
     ImuTask_Poll();
     Led_Indicate(ImuTask_IsReady(), HAL_GetTick());
   }
@@ -136,8 +142,7 @@ static void MX_GPIO_Init(void) {
   gpio.Pin = BMI088_INT_GYRO_PIN;
   HAL_GPIO_Init(BMI088_INT_GPIO_PORT, &gpio);
 
-  /* Highest priority in the system: the sample timestamp is taken on entry. */
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0U, 0U);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 1U, 0U);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
   /* Status LED, off at boot (output high would light it, so drive low). */
@@ -226,6 +231,32 @@ static void MX_TIM5_Init(void) {
   }
 }
 
+static void MX_TIM8_Init(void) {
+  TIM_OC_InitTypeDef pwm = {0};
+
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 1679U;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period =
+      (CAMERA_TRIGGER_TIMER_CLOCK_HZ / CAMERA_TRIGGER_FREQUENCY_HZ) - 1U;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_PWM_Init(&htim8) != HAL_OK) {
+    Error_Handler();
+  }
+
+  pwm.OCMode = TIM_OCMODE_PWM1;
+  pwm.Pulse =
+      (CAMERA_TRIGGER_PULSE_US * CAMERA_TRIGGER_TIMER_CLOCK_HZ) / 1000000U;
+  pwm.OCPolarity = TIM_OCPOLARITY_HIGH;
+  pwm.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &pwm, TIM_CHANNEL_1) != HAL_OK) {
+    Error_Handler();
+  }
+
+  HAL_TIM_MspPostInit(&htim8);
+}
+
 static void MX_TIM10_Init(void) {
   TIM_OC_InitTypeDef pwm = {0};
 
@@ -289,6 +320,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t gpio_pin) {
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
   if (htim->Instance == TIM5) {
     ImuTask_OnTimestampOverflow();
+  } else if (htim->Instance == TIM8) {
+    CameraTrigger_OnPeriodElapsed(htim);
   }
 }
 

@@ -12,9 +12,8 @@ void SysTick_Handler(void) {
 }
 
 /*
- * Gyroscope data-ready. Highest priority in the system on purpose: the
- * timestamp of a sample is taken from the 84 MHz counter when this interrupt is
- * entered, so nothing may delay it.
+ * Gyroscope data-ready. TIM5 overflow runs at priority 0 so the high word of
+ * the 64-bit timestamp is updated before this handler reads it.
  */
 void EXTI9_5_IRQHandler(void) {
   HAL_GPIO_EXTI_IRQHandler(BMI088_INT_GYRO_PIN);
@@ -23,6 +22,10 @@ void EXTI9_5_IRQHandler(void) {
 /* 84 MHz timestamp counter overflow (once every ~51 s). */
 void TIM5_IRQHandler(void) {
   HAL_TIM_IRQHandler(&htim5);
+}
+
+void TIM8_UP_TIM13_IRQHandler(void) {
+  HAL_TIM_IRQHandler(&htim8);
 }
 
 /* USART1 TX DMA (IMU stream frames). */
