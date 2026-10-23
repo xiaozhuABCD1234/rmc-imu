@@ -42,6 +42,7 @@
 #define IMU_STREAM_SYNC_0 0xAAU
 #define IMU_STREAM_SYNC_1 0x55U
 #define IMU_STREAM_VERSION 0x01U
+#define IMU_STREAM_VERSION_SYNC 0x02U
 
 #define IMU_STREAM_PAYLOAD_BYTES 25U
 #define IMU_STREAM_HEADER_BYTES 4U
@@ -73,6 +74,13 @@ typedef struct {
   uint8_t flags;
 } ImuStreamSample;
 
+typedef struct {
+  uint32_t seq;
+  uint64_t trigger_ns;
+  uint64_t strobe_ns;
+  uint8_t flags;
+} ImuStreamSyncEvent;
+
 /* CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no final xor. */
 uint16_t ImuStream_Crc16(const uint8_t *data, uint16_t length);
 
@@ -84,6 +92,8 @@ void ImuStream_Init(UART_HandleTypeDef *huart);
  * if the caller falls several frames behind.
  */
 bool ImuStream_Send(const ImuStreamSample *sample);
+
+bool ImuStream_SendSync(const ImuStreamSyncEvent *event);
 
 /* Kicks the next queued frame out when the UART is idle. Main loop only. */
 void ImuStream_Poll(void);

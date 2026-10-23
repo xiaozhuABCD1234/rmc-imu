@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(rmc_imu
         VERSION 1.0.0
-        DESCRIPTION "RoboMaster C board BMI088 IMU streaming over UART with the VOFA+ JustFloat protocol (STM32F407IGHx)"
+        DESCRIPTION "RoboMaster C board BMI088 IMU streaming with hardware timestamps and camera trigger sync (STM32F407IGHx)"
         LANGUAGES C ASM)
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,7 @@ set(ARCH_FLAGS
 set(CORE_SOURCES
     Core/Src/main.c
     Core/Src/bmi088.c
+    Core/Src/camera_trigger.c
     Core/Src/imu_heater.c
     Core/Src/imu_task.c
     Core/Src/imu_stream.c

@@ -8,6 +8,10 @@ Listings/
 __pycache__/
 *.pyc
 
+# Camera dataset output
+photo/*
+!photo/.gitkeep
+
 # Editor / IDE
 .vscode/
 .idea/
@@ -18,3 +22,5 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+
+×ÊÁÏ/

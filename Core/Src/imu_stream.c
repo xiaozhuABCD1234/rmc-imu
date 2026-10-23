@@ -4,11 +4,17 @@
 
 /* The producer/consumer indices live in the main loop; only s_in_flight is
  * written by the TX-complete interrupt. */
+#define IMU_STREAM_SYNC_QUEUE_DEPTH 4U
+
 static UART_HandleTypeDef *s_uart;
 static uint8_t s_queue[IMU_STREAM_QUEUE_DEPTH][IMU_STREAM_FRAME_BYTES];
 static uint16_t s_head;              /* next slot the producer writes */
 static uint16_t s_tail;              /* next slot the consumer sends */
 static uint16_t s_queued;            /* frames waiting in the ring */
+static uint8_t s_sync_queue[IMU_STREAM_SYNC_QUEUE_DEPTH][IMU_STREAM_FRAME_BYTES];
+static uint16_t s_sync_head;
+static uint16_t s_sync_tail;
+static uint16_t s_sync_queued;
 static volatile uint8_t s_in_flight; /* a DMA transfer owns the slot s_tail - 1 */
 
 uint16_t ImuStream_Crc16(const uint8_t *data, uint16_t length) {
@@ -29,6 +35,12 @@ static void ImuStream_PutU16(uint8_t *destination, uint16_t value) {
   destination[1] = (uint8_t)(value >> 8);
 }
 
+static void ImuStream_PutU32(uint8_t *destination, uint32_t value) {
+  for (uint8_t i = 0U; i < 4U; ++i) {
+    destination[i] = (uint8_t)((value >> (8U * i)) & 0xFFU);
+  }
+}
+
 static void ImuStream_PutU64(uint8_t *destination, uint64_t value) {
   for (uint8_t i = 0U; i < 8U; ++i) {
     destination[i] = (uint8_t)((value >> (8U * i)) & 0xFFU);
@@ -40,6 +52,9 @@ void ImuStream_Init(UART_HandleTypeDef *huart) {
   s_head = 0U;
   s_tail = 0U;
   s_queued = 0U;
+  s_sync_head = 0U;
+  s_sync_tail = 0U;
+  s_sync_queued = 0U;
   s_in_flight = 0U;
 }
 
@@ -84,13 +99,67 @@ bool ImuStream_Send(const ImuStreamSample *sample) {
   return true;
 }
 
+bool ImuStream_SendSync(const ImuStreamSyncEvent *event) {
+  uint8_t *frame;
+  uint8_t *payload;
+  uint16_t crc;
+
+  if ((event == NULL) ||
+      (s_sync_queued >= IMU_STREAM_SYNC_QUEUE_DEPTH)) {
+    return false;
+  }
+
+  frame = s_sync_queue[s_sync_head];
+  payload = &frame[IMU_STREAM_HEADER_BYTES];
+
+  frame[0] = IMU_STREAM_SYNC_0;
+  frame[1] = IMU_STREAM_SYNC_1;
+  frame[2] = IMU_STREAM_VERSION_SYNC;
+  frame[3] = IMU_STREAM_PAYLOAD_BYTES;
+
+  ImuStream_PutU32(&payload[0], event->seq);
+  ImuStream_PutU64(&payload[4], event->trigger_ns);
+  ImuStream_PutU64(&payload[12], event->strobe_ns);
+  payload[20] = event->flags;
+  payload[21] = 0U;
+  payload[22] = 0U;
+  payload[23] = 0U;
+  payload[24] = 0U;
+
+  crc = ImuStream_Crc16(&frame[2], (uint16_t)(2U + IMU_STREAM_PAYLOAD_BYTES));
+  ImuStream_PutU16(&frame[IMU_STREAM_HEADER_BYTES + IMU_STREAM_PAYLOAD_BYTES],
+                   crc);
+
+  s_sync_head = (uint16_t)((s_sync_head + 1U) % IMU_STREAM_SYNC_QUEUE_DEPTH);
+  ++s_sync_queued;
+  return true;
+}
+
 void ImuStream_Poll(void) {
   uint8_t *frame;
 
-  if ((s_uart == NULL) || (s_queued == 0U) || (s_in_flight != 0U)) {
+  if ((s_uart == NULL) || (s_in_flight != 0U)) {
     return;
   }
   if (HAL_UART_GetState(s_uart) != HAL_UART_STATE_READY) {
+    return;
+  }
+
+  if (s_sync_queued > 0U) {
+    frame = s_sync_queue[s_sync_tail];
+    s_sync_tail =
+        (uint16_t)((s_sync_tail + 1U) % IMU_STREAM_SYNC_QUEUE_DEPTH);
+    --s_sync_queued;
+    s_in_flight = 1U;
+
+    if (HAL_UART_Transmit_DMA(s_uart, frame, IMU_STREAM_FRAME_BYTES) !=
+        HAL_OK) {
+      s_in_flight = 0U;
+    }
+    return;
+  }
+
+  if (s_queued == 0U) {
     return;
   }
 
